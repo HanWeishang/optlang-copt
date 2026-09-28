@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "build_backend"
+backend-path = ["."]
+
+[project]
+name = "optlang-copt"
+version = "0.2.0"
+description = "An optlang and COBRApy interface for Cardinal Optimizer (COPT)"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "Apache-2.0"}
+authors = [{name = "Han Weishang"}]
+keywords = ["optimization", "COPT", "optlang", "COBRApy", "metabolic-modeling"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = [
+  "optlang>=1.5.2",
+  "coptpy>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/HanWeishang/optlang-copt"
+Repository = "https://github.com/HanWeishang/optlang-copt.git"
+Issues = "https://github.com/HanWeishang/optlang-copt/issues"
+
+[project.optional-dependencies]
+cobra = ["cobra>=0.24"]
+test = ["pytest>=7"]
+
+[project.entry-points."optlang.interfaces"]
+copt = "optlang_copt.interface"
+
+[project.entry-points."cobra.solvers"]
+copt = "optlang_copt.interface"
+
+[tool.setuptools]
+py-modules = ["_optlang_copt_bootstrap"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

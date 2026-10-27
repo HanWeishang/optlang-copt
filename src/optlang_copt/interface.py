@@ -22,6 +22,8 @@ quadratic constraints, and callbacks remain outside the compatibility scope.
 
 from __future__ import absolute_import
 
+from math import nan
+
 import coptpy
 from coptpy import COPT
 
@@ -140,10 +142,12 @@ class Variable(interface.Variable, metaclass=inheritdocstring):
     def _get_primal(self):
         if self._internal_variable is None:
             return None
+        if not self.problem._has_primal_solution():
+            return nan
         try:
             return self._internal_variable.x
         except coptpy.CoptError:
-            return None
+            return nan
 
     @property
     def dual(self):
@@ -151,6 +155,8 @@ class Variable(interface.Variable, metaclass=inheritdocstring):
             return None
         if self.problem.is_integer:
             raise ValueError("Dual values are not well-defined for integer problems")
+        if not self.problem._has_primal_solution():
+            return nan
         try:
             return self._internal_variable.rc
         except coptpy.CoptError:
@@ -188,6 +194,13 @@ class Constraint(interface.Constraint, metaclass=inheritdocstring):
             self.problem.problem.setCoeff(
                 internal_constraint, variable._internal_variable, float(coefficient)
             )
+            # optlang uses this index to remove variables from symbolic rows.
+            # COBRApy often introduces a variable through coefficient edits.
+            constraint_ids = self.problem._variables_to_constraints_mapping[variable.name]
+            if coefficient:
+                constraint_ids.add(self.name)
+            else:
+                constraint_ids.discard(self.name)
         self._get_expression()
 
     def get_linear_coefficients(self, variables):
@@ -226,6 +239,8 @@ class Constraint(interface.Constraint, metaclass=inheritdocstring):
     def primal(self):
         if self.problem is None:
             return None
+        if not self.problem._has_primal_solution():
+            return nan
         try:
             # COPT's Constraint.slack property is the row activity.
             return self._internal_constraint.slack
@@ -238,6 +253,8 @@ class Constraint(interface.Constraint, metaclass=inheritdocstring):
             return None
         if self.problem.is_integer:
             raise ValueError("Dual values are not well-defined for integer problems")
+        if not self.problem._has_primal_solution():
+            return nan
         try:
             return self._internal_constraint.pi
         except coptpy.CoptError:
@@ -286,10 +303,12 @@ class Objective(interface.Objective, metaclass=inheritdocstring):
     def value(self):
         if getattr(self, "problem", None) is None:
             return None
+        if not self.problem._has_primal_solution():
+            return nan
         try:
             return self.problem.problem.objval
         except coptpy.CoptError:
-            return None
+            return nan
 
     @interface.Objective.direction.setter
     def direction(self, value):
@@ -325,6 +344,13 @@ class Objective(interface.Objective, metaclass=inheritdocstring):
 
 
 class Configuration(interface.MathematicalProgrammingConfiguration, metaclass=inheritdocstring):
+    @classmethod
+    def clone(cls, config, problem=None, **kwargs):
+        copied = super(Configuration, cls).clone(config, problem=problem, **kwargs)
+        if isinstance(config, cls):
+            copied.__setstate__(config.__getstate__())
+        return copied
+
     def __init__(
         self,
         lp_method="auto",
@@ -425,7 +451,7 @@ class Configuration(interface.MathematicalProgrammingConfiguration, metaclass=in
         }
 
     def __getstate__(self):
-        return {
+        state = {
             "presolve": self.presolve,
             "timeout": self.timeout,
             "verbosity": self.verbosity,
@@ -436,26 +462,58 @@ class Configuration(interface.MathematicalProgrammingConfiguration, metaclass=in
                 "integrality": self.tolerances.integrality,
             },
         }
+        # Include nondefault settings made directly through native setParam,
+        # such as MemLimit and RelGap, when copying or rebuilding a model.
+        native_parameters = {}
+        for name in dir(COPT.Param):
+            if name.startswith("_"):
+                continue
+            parameter = getattr(COPT.Param, name)
+            if not isinstance(parameter, str):
+                continue
+            try:
+                _, current, default, _, _ = self.problem.problem.getParamInfo(parameter)
+            except (coptpy.CoptError, AttributeError):
+                continue
+            if current != default:
+                native_parameters[parameter] = current
+        state["native_parameters"] = native_parameters
+        return state
 
     def __setstate__(self, state):
         for key, value in state.items():
-            if key != "tolerances":
+            if key not in ("tolerances", "native_parameters"):
                 setattr(self, key, value)
         for key, value in state.get("tolerances", {}).items():
             setattr(self.tolerances, key, value)
+        for parameter, value in state.get("native_parameters", {}).items():
+            self.problem.problem.setParam(parameter, value)
 
 
 class Model(interface.Model):
+    def __getstate__(self):
+        state = super(Model, self).__getstate__()
+        state["_copt_configuration"] = self.configuration.__getstate__()
+        return state
+
+    def __setstate__(self, state):
+        super(Model, self).__setstate__(state)
+        configuration = state.get("_copt_configuration")
+        if configuration is not None:
+            self.configuration.__setstate__(configuration)
+
     def _initialize_problem(self):
         self._environment = coptpy.Envr()
         self.problem = self._environment.createModel(self.name or "optlang-copt")
         self.problem.setParam(COPT.Param.Logging, 0)
+        self._had_quadratic_objective = False
 
     def _initialize_model_from_problem(self, problem):
         if not isinstance(problem, coptpy.Model):
             raise TypeError("Provided problem is not a valid COPT model.")
         self.problem = problem
         self._environment = None
+        self._had_quadratic_objective = bool(problem.HasQObj)
         variables = []
         for native in self.problem.getVars():
             variables.append(
@@ -528,10 +586,16 @@ class Model(interface.Model):
                 float(coefficient) * native_variables[0] * native_variables[1]
             )
         native_expression = coptpy.quicksum(terms) + float(offset)
+        if self.problem.HasQObj:
+            self._had_quadratic_objective = True
+            # setObjective alone can leave the previous quadratic terms in COPT.
+            self.problem.delQuadObj()
         self.problem.setObjective(
             native_expression,
             {"min": COPT.MINIMIZE, "max": COPT.MAXIMIZE}[direction],
         )
+        if self.problem.HasQObj:
+            self._had_quadratic_objective = True
 
     def _rebuild_native_problem(self):
         """Recreate COPT state from optlang state without dangling QP terms.
@@ -553,6 +617,7 @@ class Model(interface.Model):
         new_problem.setParam(COPT.Param.Logging, 0)
         self._environment = new_environment
         self.problem = new_problem
+        self._had_quadratic_objective = False
 
         for variable in self._variables:
             self.problem.addVar(
@@ -617,9 +682,22 @@ class Model(interface.Model):
         # important when coefficients were changed directly on the COPT model.
         self.objective._expression = self.objective.expression
         self.objective._expression_expired = False
+        if not (self.problem.HasQObj or self._had_quadratic_objective):
+            # Keep the native LP/MIP and its settings; rebuilding on each
+            # reaction deletion is prohibitively expensive for large drafts.
+            native_variables = [variable._internal_variable for variable in variables]
+            super(Model, self)._remove_variables(variables)
+            self.problem.remove(native_variables)
+            self.problem.update()
+            return
         for constraint in self._constraints:
             constraint._expression = constraint.expression
         super(Model, self)._remove_variables(variables)
+        # Also cover coefficient edits made directly on native COPT rows,
+        # which bypass optlang's variable-to-constraint bookkeeping.
+        replacements = {variable: 0 for variable in variables}
+        for constraint in self._constraints:
+            constraint._expression = constraint._expression.xreplace(replacements)
         self._rebuild_native_problem()
 
     def _add_constraints(self, constraints, sloppy=False):
@@ -668,19 +746,37 @@ class Model(interface.Model):
         return [constraint.name for constraint in self.problem.getConstrs()]
 
     def _get_primal_values(self):
+        if not self._has_primal_solution():
+            return [nan] * len(self.variables)
         try:
-            return list(self.problem.getValues())
+            return [nan if value is None else value for value in self.problem.getValues()]
         except coptpy.CoptError:
-            return [None] * len(self.variables)
+            return [nan] * len(self.variables)
+
+    def _has_primal_solution(self):
+        """Distinguish a feasible incumbent from COPT's no-solution sentinel.
+
+        Resource-limited solves may still have a valid LP solution or MIP
+        incumbent. Infeasible/unbounded states must not expose stale values.
+        """
+        if self.problem.status in (
+            COPT.UNSTARTED, COPT.INFEASIBLE, COPT.UNBOUNDED, COPT.INF_OR_UNB
+        ):
+            return False
+        return bool(self.problem.hasmipsol if self.is_integer else self.problem.haslpsol)
 
     def _get_reduced_costs(self):
         if self.is_integer:
             raise ValueError("Reduced costs are not well-defined for integer problems.")
+        if not self._has_primal_solution():
+            return [nan] * len(self.variables)
         return list(self.problem.getRedcosts())
 
     def _get_shadow_prices(self):
         if self.is_integer:
             raise ValueError("Shadow prices are not well-defined for integer problems.")
+        if not self._has_primal_solution():
+            return [nan] * len(self.constraints)
         return list(self.problem.getDuals())
 
     @property

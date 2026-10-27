@@ -5,7 +5,7 @@ backend-path = ["."]
 
 [project]
 name = "optlang-copt"
-version = "0.2.0"
+version = "0.2.1"
 description = "An optlang and COBRApy interface for Cardinal Optimizer (COPT)"
 readme = "README.md"
 requires-python = ">=3.7"

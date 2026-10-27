@@ -19,7 +19,7 @@ package.
 
 Quadratic constraints (QCP/MIQCP), indicator/SOS constraints, callbacks,
 native COPT model serialization, and advanced basis operations are not part of
-version 0.2.0.
+version 0.2.1.
 
 ## Installation
 
@@ -84,10 +84,34 @@ with model:
     quadratic_result = moma(model, solution=reference, linear=False)
 ```
 
-Version 0.2.0 rebuilds the native COPT model when COBRApy removes QP
-auxiliary variables during context rollback. This avoids stale native
-quadratic references in COPT 8.0.6 and allows subsequent FBA, ROOM, or
-loopless calculations to continue on the same model.
+Version 0.2.1 removes LP/MIP variables in place, including variables introduced
+by constraint-coefficient edits. For models with a current or previous
+quadratic objective, it safely rebuilds the native COPT model when removing
+variables during context rollback. Replacing an objective clears previous
+quadratic terms. These fixes allow subsequent FBA, ROOM, or loopless
+calculations to continue on the same model without an application-side patch.
+
+### Configuration copies and missing solutions
+
+Model cloning, `copy.deepcopy`, pickling, and native QP rebuilds preserve
+solver tolerances, timeout, presolve and LP method. Nondefault model parameters
+set directly through `model.problem.setParam`, such as `MemLimit` and `RelGap`,
+are also preserved. Multi-objective-specific parameters are outside this scope.
+
+For attached models with no available solution, primal and objective values
+are `NaN`; detached variables/objectives continue to return `None`. Solver
+status remains unchanged. A time or node limit can still leave a feasible
+LP solution or MIP incumbent, whose values remain accessible. Applications
+must check status, finite values and their own acceptance criteria before
+using a result; a resource-limited incumbent is not necessarily optimal.
+
+### Building a local release
+
+```bash
+python -m pip install build
+python -m build
+python -m pip install --no-deps dist/optlang_copt-0.2.1-py3-none-any.whl
+```
 
 ## Direct optlang usage
 

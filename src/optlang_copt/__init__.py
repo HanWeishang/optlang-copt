@@ -5,7 +5,7 @@ import sys
 from . import interface
 from .interface import Configuration, Constraint, Model, Objective, Variable
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 
 def register_with_optlang():
